@@ -40,11 +40,13 @@ import org.adempiere.webui.apps.BusyDialog;
 import org.adempiere.webui.apps.ProcessModalDialog;
 import org.adempiere.webui.apps.WProcessCtl;
 import org.adempiere.webui.component.Button;
+import org.adempiere.webui.component.Combobox;
 import org.adempiere.webui.component.Grid;
 import org.adempiere.webui.component.Label;
 import org.adempiere.webui.component.ListItem;
 import org.adempiere.webui.component.Listbox;
 import org.adempiere.webui.component.ListboxFactory;
+import org.adempiere.webui.component.Textbox;
 import org.adempiere.webui.component.Menupopup;
 import org.adempiere.webui.component.Panel;
 import org.adempiere.webui.component.ProcessInfoDialog;
@@ -92,7 +94,9 @@ import org.zkoss.zk.ui.event.DropEvent;
 import org.zkoss.zk.ui.event.Event;
 import org.zkoss.zk.ui.event.EventListener;
 import org.zkoss.zk.ui.event.Events;
+import org.zkoss.zk.ui.event.InputEvent;
 import org.zkoss.zk.ui.event.OpenEvent;
+import org.zkoss.zk.ui.util.Clients;
 import org.zkoss.zul.Auxhead;
 import org.zkoss.zul.Auxheader;
 import org.zkoss.zul.Borderlayout;
@@ -100,6 +104,7 @@ import org.zkoss.zul.Cell;
 import org.zkoss.zul.Checkbox;
 import org.zkoss.zul.Column;
 import org.zkoss.zul.Columns;
+import org.zkoss.zul.Comboitem;
 import org.zkoss.zul.Div;
 import org.zkoss.zul.Hbox;
 import org.zkoss.zul.Hlayout;
@@ -135,10 +140,15 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 
 	private Panel panel = new Panel();
 	private Label lProcess = new Label();
-	private Listbox kanbanListbox = ListboxFactory.newDropdownListbox();
+	private Combobox kanbanListbox = new Combobox();
 	private Listbox swimlaneListbox = null;
 	private int kanbanBoardId = -1;
 	private Button bRefresh = new Button();
+	private Textbox bSearch = new Textbox();
+	private Label bSearchInfo = new Label();
+	private Button bSearchClear = new Button();
+	private Button bDensityToggle = new Button();
+	private boolean isCompactDensity = false;
 	private Timer timer;
 	private Menupopup menupopup;
 	private Menupopup cardpopup;
@@ -209,22 +219,74 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 			bRefresh.setImage(ThemeManager.getThemeResource("images/Refresh16.png"));
 		bRefresh.setId(KDB_REFRESH_BUTTON_ID);
 		bRefresh.setTooltiptext(Msg.getMsg(Env.getCtx(), "Refresh"));
-		bRefresh.setHeight("70%");
 		bRefresh.addEventListener(Events.ON_CLICK, this);
 
 		northPanelHbox = new Hbox();
 		northPanelHbox.setAlign("center");
 		northPanelHbox.appendChild(lProcess);
-		kanbanListbox.setHeight("70%");
+		// Combobox ZK no lugar do dropdown native (Listbox mold=select):
+		// popup é Component ZK estilizável via CSS, ao contrário do <select>
+		// nativo cujo dropdown é renderizado pelo OS/browser.
+		// NOTA: setReadonly(true) bloqueia a seleção via popup no Combobox ZK
+		// — não usar. Sem readonly o user pode digitar livremente, mas como
+		// o ON_SELECT só dispara quando o texto bate com um Comboitem real,
+		// digitação random é no-op (não machuca).
+		kanbanListbox.setAutodrop(true);
+		kanbanListbox.setSclass("riskora-kanban-process-combo");
 		northPanelHbox.appendChild(kanbanListbox);
 		northPanelHbox.appendChild(bRefresh);
+
+		// Search global — filtra cards visíveis client-side.
+		bSearch.setPlaceholder(Msg.getMsg(Env.getCtx(), "Search"));
+		bSearch.setInstant(true);
+		bSearch.setSclass("riskora-kanban-search");
+		bSearch.setWidth("240px");
+		bSearch.addEventListener(Events.ON_CHANGING, e -> {
+			String q = ((InputEvent) e).getValue();
+			applyCardSearchFilter(q);
+		});
+		northPanelHbox.appendChild(bSearch);
+
+		// Botão "×" pra limpar a busca rapidamente sem ter que apagar
+		// caractere por caractere. Visível só quando há texto digitado
+		// (gerenciado via JS no applyCardSearchFilter).
+		bSearchClear.setLabel("×");
+		bSearchClear.setTooltiptext(Msg.getMsg(Env.getCtx(), "Reset"));
+		bSearchClear.setSclass("riskora-kanban-search-clear");
+		bSearchClear.setVisible(false);
+		bSearchClear.addEventListener(Events.ON_CLICK, e -> {
+			bSearch.setValue("");
+			applyCardSearchFilter("");
+		});
+		northPanelHbox.appendChild(bSearchClear);
+
+		// Contador "X de Y" — feedback de quantos cards o filtro deixou
+		// visíveis. Vazio quando search não tem texto.
+		bSearchInfo.setSclass("riskora-kanban-search-info");
+		northPanelHbox.appendChild(bSearchInfo);
+
+		// Density toggle — alterna entre comfortable (default) e compact
+		// (cards menores, mais densos pra ver 30+ por coluna sem scroll).
+		bDensityToggle.setIconSclass("z-icon-th-list");
+		bDensityToggle.setTooltiptext(Msg.getMsg(Env.getCtx(), "Compact"));
+		bDensityToggle.setSclass("riskora-kanban-density-toggle");
+		bDensityToggle.addEventListener(Events.ON_CLICK, e -> {
+			isCompactDensity = !isCompactDensity;
+			Clients.evalJavaScript(
+				"document.body.classList.toggle('kdb-density-compact', " + isCompactDensity + ");"
+			);
+		});
+		northPanelHbox.appendChild(bDensityToggle);
 		
 		panel.setHeight("100%");
 		northPanelHbox.setHeight("100%");
 		panel.appendChild(northPanelHbox);
 
 		North north = new North();
-		north.setSize("5%");
+		// Altura fixa em px (ao invés de 5% do form) garante respiro pros
+		// componentes da toolbar (Combobox + Refresh + Search ~32px cada
+		// + padding 12px top/bottom). 5% num form curto comprimia tudo.
+		north.setSize("56px");
 		LayoutUtils.addSclass("tab-editor-form-north-panel", north);
 		mainLayout.appendChild(north);
 		north.appendChild(panel);
@@ -267,11 +329,13 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 		//	Fill Process
 		String userPreferenceKanban = Env.getContext(Env.getCtx(), "P|KDB_KanbanBoard_ID");
 		for (KeyNamePair process : getProcessList()) {
-			kanbanListbox.addItem(process);
+			Comboitem item = new Comboitem(process.getName());
+			item.setValue(process.getKey());
+			kanbanListbox.appendChild(item);
 			if (!Util.isEmpty(userPreferenceKanban)
 					&& process.getKey() == Integer.parseInt(userPreferenceKanban)) {
 				kanbanBoardId = Integer.parseInt(userPreferenceKanban);
-				kanbanListbox.setSelectedKeyNamePair(process);
+				kanbanListbox.setSelectedItem(item);
 			}
 		}
 
@@ -788,9 +852,15 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 	}
 
 	private Vlayout createCell(MKanbanCard card) {
-		Vlayout div = new Vlayout();		
+		Vlayout div = new Vlayout();
+		// Class invariante pra todos os cards do kanban, independente do
+		// template HTML que o usuário configurou (Riskora usa
+		// .riskora-kanban-card, default usa .kanban-card, etc).
+		// Permite que o search global (e qualquer outro consumidor JS)
+		// alvo todos os cards com seletor estável.
+		LayoutUtils.addSclass("kdb-card-shell", div);
 		StringBuilder divStyle = new StringBuilder();
-		
+
 		divStyle.append("text-align: left; ");
 		
 		if (!card.isQueued())
@@ -1158,7 +1228,10 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 	 * @return true if the user interacted with a list component
 	 */
 	private boolean isInteractionWithAList(Event e) {
-		return Events.ON_SELECT.equals(e.getName()) && e.getTarget() instanceof Listbox;
+		// kanbanListbox virou Combobox (popup ZK estilizável); swimlaneListbox
+		// continua Listbox. Aceita ambos os tipos no ON_SELECT.
+		if (!Events.ON_SELECT.equals(e.getName())) return false;
+		return e.getTarget() instanceof Listbox || e.getTarget() instanceof Combobox;
 	}
 	
 	/**
@@ -1274,15 +1347,61 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 	}
 	
 	private void selectKanbanBoard() {
-		if (kanbanListbox.getSelectedIndex() != -1) {
-			clearParameterContext();
-			KeyNamePair kanbanKeyNamePair = null;
-			kanbanBoardId = -1;
-			kanbanKeyNamePair = (KeyNamePair) kanbanListbox.getSelectedItem().toKeyNamePair();	
-			if (kanbanKeyNamePair != null)
-				kanbanBoardId = kanbanKeyNamePair.getKey();
-			fullRefresh();
+		Comboitem selected = kanbanListbox.getSelectedItem();
+		if (selected == null) return;
+		clearParameterContext();
+		kanbanBoardId = -1;
+		Object value = selected.getValue();
+		if (value instanceof Integer) {
+			kanbanBoardId = (Integer) value;
 		}
+		fullRefresh();
+	}
+
+	/**
+	 * Aplica filtro de busca em todos os cards visíveis do board via JS
+	 * client-side. Não toca em data — só esconde elementos DOM cujo texto
+	 * não bate com a query.
+	 *
+	 * Match: case-insensitive, substring no textContent inteiro do card.
+	 * Útil pra encontrar rapidamente um documento por número, nome, doc
+	 * sem precisar de filtro server-side (que exigiria reload de dataset).
+	 *
+	 * Query vazia restaura a visibilidade de todos os cards.
+	 */
+	private void applyCardSearchFilter(String query) {
+		boolean hasQuery = query != null && !query.trim().isEmpty();
+		bSearchClear.setVisible(hasQuery);
+		String q = !hasQuery ? "" : query.trim().toLowerCase().replace("\\", "\\\\").replace("'", "\\'");
+		StringBuilder js = new StringBuilder();
+		js.append("(function(q){");
+		// .kdb-card-shell é adicionado pelo plugin em todo createCell,
+		// independente do template HTML do card (Riskora, default, custom).
+		js.append("  var cards = document.querySelectorAll('.kanban-board-form-content .kdb-card-shell');");
+		js.append("  var total = cards.length, matched = 0;");
+		js.append("  cards.forEach(function(c){");
+		js.append("    if (!q) { c.style.display = ''; matched++; return; }");
+		js.append("    var text = (c.textContent || '').toLowerCase();");
+		js.append("    var ok = text.indexOf(q) >= 0;");
+		js.append("    c.style.display = ok ? '' : 'none';");
+		js.append("    if (ok) matched++;");
+		js.append("  });");
+		// Marker no board E no south-body — CSS targeting precisa do attr no
+		// próprio elemento que carrega o ::after (attr() não cruza elementos).
+		js.append("  var board = document.querySelector('.kanban-board-form-content');");
+		js.append("  var south = document.querySelector('.kanban-board-form-content .z-south-body');");
+		js.append("  [board, south].forEach(function(el){");
+		js.append("    if (!el) return;");
+		js.append("    el.dataset.searchActive = q ? 'true' : 'false';");
+		js.append("    el.dataset.searchQuery = q;");
+		js.append("    el.dataset.searchMatched = matched;");
+		js.append("    el.dataset.searchEmpty = (q && matched === 0) ? 'true' : 'false';");
+		js.append("  });");
+		// Atualiza o label contador
+		js.append("  var info = document.querySelector('.riskora-kanban-search-info');");
+		js.append("  if (info) info.textContent = q ? (matched + ' de ' + total) : '';");
+		js.append("})('").append(q).append("');");
+		Clients.evalJavaScript(js.toString());
 	}
 	
 	private void selectSwimlane() {
@@ -1484,9 +1603,13 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 	private void cleanNorthPanel() {
 		List<Component> childsToRemove = new ArrayList<Component>();
 		for (Component component : northPanelHbox.getChildren()) {
-			if (!component.equals(lProcess) 
-					&& !component.equals(kanbanListbox) 
-					&& !component.equals(bRefresh))
+			if (!component.equals(lProcess)
+					&& !component.equals(kanbanListbox)
+					&& !component.equals(bRefresh)
+					&& !component.equals(bSearch)
+					&& !component.equals(bSearchClear)
+					&& !component.equals(bSearchInfo)
+					&& !component.equals(bDensityToggle))
 				childsToRemove.add(component);
 		}
 		for (Component component : childsToRemove)
