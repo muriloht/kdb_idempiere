@@ -138,6 +138,11 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 
 	private Borderlayout	mainLayout	= new Borderlayout();
 
+	/** AD_Form do Cockpit Operacional Riskora (WAnalysisOperationalForm). Para boards
+	 *  cujo registro é Z_Eval_Analysis, o duplo-clique abre o cockpit nessa análise em
+	 *  vez da janela nativa. ID literal (sem dependência de compilação com o Riskora). */
+	private static final int RISKORA_COCKPIT_FORM_ID = 1500453;
+
 	private Panel panel = new Panel();
 	private Label lProcess = new Label();
 	private Combobox kanbanListbox = new Combobox();
@@ -1082,8 +1087,15 @@ public class WKanbanBoard extends KanbanBoard implements IFormController, EventL
 			MKanbanCard card = mapCellColumn.get(e.getTarget());
 			int recordId = card.getRecordID();
 			int AD_Table_ID = getAd_Table_id();
-			int AD_Window_ID =  getAD_Window_ID();
-			zoom(recordId,AD_Table_ID, AD_Window_ID);
+			if (AD_Table_ID == MTable.getTable_ID("Z_Eval_Analysis")) {
+				// Board de análises: abre o Cockpit nessa análise (foca um já aberto
+				// em vez de empilhar abas). Contexto setado ANTES do open.
+				Env.setContext(Env.getCtx(), "Z_Eval_Analysis_ID", recordId);
+				SessionManager.getAppDesktop().openOrFocusForm(RISKORA_COCKPIT_FORM_ID);
+			} else {
+				int AD_Window_ID =  getAD_Window_ID();
+				zoom(recordId,AD_Table_ID, AD_Window_ID);
+			}
 		} else if (e instanceof DropEvent ) {
 			DropEvent me = (DropEvent) e;
 			Cell startItem = null;
